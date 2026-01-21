@@ -3,82 +3,98 @@ import { PlaywrightCrawler } from 'crawlee';
 
 await Actor.init();
 
-// 1. Get the profile URL
+// 1. Get Input
 const input = await Actor.getInput();
-if (!input?.profileUrl) throw new Error('Input "profileUrl" is required!');
+const profileUrl = input?.profileUrl;
+if (!profileUrl) throw new Error('Input "profileUrl" is required!');
 
-// 2. Setup Proxy
+// 2. Proxy Configuration
+// We MUST use Apify's RESIDENTIAL proxies if possible. 
+// Datacenter proxies (the free ones) are blocked 99% of the time by LinkedIn.
 const proxyConfiguration = await Actor.createProxyConfiguration({
     groups: ['RESIDENTIAL'], 
-}).catch(() => Actor.createProxyConfiguration());
+}).catch(() => {
+    console.log('WARNING: Residential proxies not found. Using standard proxies (High chance of blocking).');
+    return Actor.createProxyConfiguration();
+});
 
-// 3. Crawler
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
-    
-    // Make the browser look more human
+    useSessionPool: true,
+    persistCookiesPerSession: true,
+
+    // 3. Stealth Options
+    // This tries to hide the "I am a robot" flag from the browser
     browserPoolOptions: {
         useFingerprints: true,
     },
     
+    // 4. Browser Launch Options
+    launchContext: {
+        launchOptions: {
+            headless: true, // LinkedIn sometimes blocks headless, but we have to use it on servers
+            args: [
+                '--disable-blink-features=AutomationControlled', // Hide the automation flag
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+            ],
+        },
+    },
+
     requestHandler: async ({ page, request, log }) => {
         log.info(`Processing: ${request.url}`);
-        
-        // A) Go to the page and wait for 'domcontentloaded'
+
+        // 5. Randomize Viewport (Look like a real screen)
+        await page.setViewportSize({ width: 1920, height: 1080 });
+
+        // 6. Go to the page
+        // We wait for 'commit' first, then look for selectors, to speed things up
         await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        
-        // B) FIX: Wait for the page to settle (handle redirects)
+
+        // 7. Check for Authwall (The "Sign In" blocker)
         try {
-            await page.waitForLoadState('networkidle', { timeout: 10000 });
-        } catch (e) {
-            log.warning('Network did not idle, proceeding anyway...');
-        }
-        
-        // C) Safer Title Check (Retry if context is lost)
-        let title = '';
+            const title = await page.title();
+            if (title.includes('Sign In') || title.includes('Log In') || title.includes('Authwall') || title.includes('Join LinkedIn')) {
+                log.error('BLOCKED: LinkedIn detected the bot and showed the Login Wall.');
+                log.error('SOLUTION: You cannot scrape anonymously from this IP. You need Residential Proxies or a Login Cookie.');
+                return; 
+            }
+        } catch (e) {}
+
+        // 8. Wait for "Public" Profile Selectors
+        // Public profiles often have different classes than logged-in ones.
+        // We look for the main card or the "Join to view full profile" blur.
         try {
-            title = await page.title();
+            await page.waitForSelector('main', { timeout: 15000 });
         } catch (e) {
-            log.warning('Context lost during title check, retrying...');
-            await page.waitForTimeout(2000); // Give it a moment
-            title = await page.title();
+            log.warning('Could not find main content. Page might be empty or blocked.');
         }
 
-        // Check for Login Wall
-        if (title.includes('Sign In') || title.includes('Authwall') || title.includes('Log In')) {
-            log.error('BLOCKED: LinkedIn redirected to a login page. Residential proxies are required.');
-            return;
-        }
-
-        // D) Wait for profile content
-        try { 
-            // Wait for the main profile card to appear
-            await page.waitForSelector('.pv-top-card', { timeout: 15000 }); 
-        } catch (e) {
-            log.warning('Could not find profile card. We might be on a public profile view or blocked.');
-        }
-
-        // E) Extract Data
+        // 9. Scrape Data (Public View Selectors)
         const data = await page.evaluate(() => {
             const get = (s) => document.querySelector(s)?.innerText?.trim();
-            
-            // Try different selectors because LinkedIn changes them for public vs logged-in views
+            const getAttr = (s, a) => document.querySelector(s)?.getAttribute(a);
+
             return {
                 url: window.location.href,
-                name: get('h1') || get('.top-card-layout__title'),
-                headline: get('.text-body-medium') || get('.top-card-layout__headline'),
-                location: get('.text-body-small.inline.t-black--light') || get('.top-card-layout__first-subline'),
-                about: document.querySelector('#about')?.parentElement.innerText || null,
+                // These selectors target the PUBLIC version of the profile
+                name: get('h1.top-card-layout__title') || get('h1'),
+                headline: get('h2.top-card-layout__headline') || get('.top-card-layout__headline'),
+                location: get('.top-card-layout__first-subline') || get('div.top-card__subline-item'),
+                about: get('section.summary div.core-section-container__content') || null,
+                // Sometimes public profiles hide details behind a "Sign in to view" blur
+                isPublicView: true,
             };
         });
 
-        log.info(`Scraped Name: ${data.name}`);
-        await Actor.pushData(data);
+        if (!data.name) {
+            log.error('Scraping failed: Could not find name. Likely blocked.');
+        } else {
+            log.info(`Successfully scraped public profile: ${data.name}`);
+            await Actor.pushData(data);
+        }
     },
-
-    // Optional: Reduce failed request noise
-    maxRequestRetries: 2,
 });
 
-await crawler.run([input.profileUrl]);
+await crawler.run([profileUrl]);
 await Actor.exit();
