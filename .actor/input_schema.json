@@ -1,0 +1,15 @@
+{
+    "title": "LinkedIn Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "profileUrl": {
+            "title": "Profile URL",
+            "type": "string",
+            "description": "LinkedIn profile URL",
+            "editor": "textfield",
+            "prefill": "https://www.linkedin.com/in/satyanadella/"
+        }
+    },
+    "required": ["profileUrl"]
+}
