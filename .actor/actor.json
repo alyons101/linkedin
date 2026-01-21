@@ -1,0 +1,7 @@
+{
+    "actorSpecification": 1,
+    "name": "linkedin-simple-scraper",
+    "version": "1.0",
+    "dockerfile": "./Dockerfile",
+    "storages": { "dataset": "./storage/datasets/default" }
+}
